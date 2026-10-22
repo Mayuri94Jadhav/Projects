@@ -1,0 +1,837 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+npm create vite@latest sheet50 -- --template react
+cd sheet50
+npm install
+npm install xlsx lucide-react
+npm run dev
+import { useEffect, useMemo, useRef, useState } from "react";
+import * as XLSX from "xlsx";
+import {
+  Upload, Play, CheckCircle2, XCircle, Edit2, Trash2,
+  ChevronLeft, ChevronRight, BookOpen, Home, Search,
+  AlertCircle, Loader2, Award, TrendingDown, X, Check,
+  Circle, RotateCcw, Plus, FileSpreadsheet
+} from "lucide-react";
+
+const T = {
+  bg: "#121317",
+  panel: "#1B1D23",
+  panelAlt: "#22252C",
+  border: "#2C2F38",
+  text: "#EDEAE3",
+  textMuted: "#8B8F99",
+  textFaint: "#5C606B",
+  amber: "#E7A23D",
+  amberSoft: "rgba(231,162,61,0.14)",
+  green: "#5FAE83",
+  greenSoft: "rgba(95,174,131,0.14)",
+  red: "#D9645A",
+  redSoft: "rgba(217,100,90,0.14)",
+};
+
+const uid = () => "q_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+
+async function loadKey(key, fallback) {
+  try {
+    const v = localStorage.getItem(key);
+    return v ? JSON.parse(v) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+async function saveKey(key, value) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function buildSession(bank, size = 50) {
+  const pool = bank.map((q) => {
+    const seen = q.timesSeen || 0;
+    const wrong = q.timesWrong || 0;
+    const weight = seen === 0 ? 6 : 1 + (wrong / Math.max(seen, 1)) * 5;
+    return { q, weight };
+  });
+
+  const n = Math.min(size, pool.length);
+  const working = [...pool];
+  const chosen = [];
+
+  for (let i = 0; i < n; i++) {
+    const total = working.reduce((s, x) => s + x.weight, 0);
+    let r = Math.random() * total;
+    let idx = 0;
+    for (; idx < working.length; idx++) {
+      r -= working[idx].weight;
+      if (r <= 0) break;
+    }
+    idx = Math.min(idx, working.length - 1);
+    chosen.push(working[idx].q);
+    working.splice(idx, 1);
+  }
+
+  for (let i = chosen.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [chosen[i], chosen[j]] = [chosen[j], chosen[i]];
+  }
+  return chosen;
+}
+
+function weakCategories(bank) {
+  const map = {};
+  bank.forEach((q) => {
+    const cat = (q.category || "Uncategorized").trim() || "Uncategorized";
+    if (!map[cat]) map[cat] = { seen: 0, wrong: 0 };
+    map[cat].seen += q.timesSeen || 0;
+    map[cat].wrong += q.timesWrong || 0;
+  });
+  return Object.entries(map)
+    .filter(([, v]) => v.seen > 0)
+    .map(([cat, v]) => ({ cat, rate: v.wrong / v.seen, seen: v.seen }))
+    .sort((a, b) => b.rate - a.rate)
+    .slice(0, 5);
+}
+
+function normalizeKey(k) {
+  return String(k).trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function parseAnswer(answerRaw, options = []) {
+  const ans = String(answerRaw || "").trim();
+  if (!ans) return -1;
+  if (/^[a-d]$/i.test(ans)) return ans.toUpperCase().charCodeAt(0) - 65;
+  if (/^[1-4]$/.test(ans)) return parseInt(ans, 10) - 1;
+  return options.findIndex((o) => String(o).trim().toLowerCase() === ans.toLowerCase());
+}
+
+function parseRowToQuestion(row) {
+  const norm = {};
+  Object.keys(row).forEach((k) => {
+    norm[normalizeKey(k)] = row[k];
+  });
+
+  const question = String(norm.question || norm.q || norm.questiontext || norm.prompt || "").trim();
+
+  const optionSets = [
+    ["optiona", "a", "choicea", "opt1"],
+    ["optionb", "b", "choiceb", "opt2"],
+    ["optionc", "c", "choicec", "opt3"],
+    ["optiond", "d", "choiced", "opt4"],
+  ];
+
+  const options = optionSets.map((keys) => {
+    for (const k of keys) {
+      if (norm[k] !== undefined && String(norm[k]).trim() !== "") return String(norm[k]).trim();
+    }
+    return "";
+  });
+
+  const correctIndex = parseAnswer(norm.answer || norm.correct || norm.correctanswer || norm.correctoption || norm.ans, options);
+  const category = String(norm.category || norm.topic || norm.tag || "").trim();
+
+  return { question, options, correctIndex, category };
+}
+
+function parseFileToRows(arrayBuffer) {
+  const wb = XLSX.read(arrayBuffer, { type: "array" });
+  const sheet = wb.Sheets[wb.SheetNames[0]];
+  return XLSX.utils.sheet_to_json(sheet, { defval: "" });
+}
+
+function Btn({ children, onClick, variant = "default", disabled, className = "", type = "button" }) {
+  const base = {
+    default: { background: T.amber, color: "#181818", border: `1px solid ${T.amber}` },
+    ghost: { background: "transparent", color: T.text, border: `1px solid ${T.border}` },
+    subtle: { background: T.panelAlt, color: T.text, border: `1px solid ${T.border}` },
+    danger: { background: "transparent", color: T.red, border: `1px solid ${T.red}55` },
+  }[variant];
+
+  return (
+    <button
+      type={type}
+      onClick={onClick}
+      disabled={disabled}
+      className={`px-4 py-2 rounded-lg text-sm font-medium inline-flex items-center gap-2 ${className}`}
+      style={{
+        ...base,
+        opacity: disabled ? 0.4 : 1,
+        cursor: disabled ? "not-allowed" : "pointer",
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+function Card({ children, className = "", style = {} }) {
+  return (
+    <div
+      className={`rounded-xl p-5 ${className}`}
+      style={{ background: T.panel, border: `1px solid ${T.border}`, ...style }}
+    >
+      {children}
+    </div>
+  );
+}
+
+function TopBar({ view, setView, onExitSession }) {
+  const items = [
+    { id: "dashboard", label: "Dashboard", icon: Home },
+    { id: "manage", label: "Question Bank", icon: BookOpen },
+  ];
+
+  return (
+    <div
+      style={{ background: T.bg, borderBottom: `1px solid ${T.border}` }}
+      className="flex items-center justify-between px-6 py-4 sticky top-0 z-10"
+    >
+      <div className="flex items-center gap-2">
+        <div className="w-8 h-8 rounded-md flex items-center justify-center font-bold" style={{ background: T.amber, color: "#181818" }}>
+          ✓
+        </div>
+        <span style={{ color: T.text, fontWeight: 700 }}>Sheet<span style={{ color: T.amber }}>50</span></span>
+      </div>
+
+      {view !== "session" ? (
+        <div className="flex items-center gap-1">
+          {items.map((it) => {
+            const Icon = it.icon;
+            const active = view === it.id;
+            return (
+              <button
+                key={it.id}
+                onClick={() => setView(it.id)}
+                className="px-3 py-1.5 rounded-lg text-sm inline-flex items-center gap-1.5"
+                style={{
+                  color: active ? T.amber : T.textMuted,
+                  background: active ? T.amberSoft : "transparent",
+                }}
+              >
+                <Icon size={15} /> {it.label}
+              </button>
+            );
+          })}
+        </div>
+      ) : (
+        <button
+          onClick={onExitSession}
+          className="text-xs px-3 py-1.5 rounded-lg"
+          style={{ color: T.textMuted, border: `1px solid ${T.border}` }}
+        >
+          Exit session
+        </button>
+      )}
+    </div>
+  );
+}
+
+function QuestionForm({ initial, onCancel, onSave }) {
+  const [question, setQuestion] = useState(initial?.question || "");
+  const [options, setOptions] = useState(initial?.options || ["", "", "", ""]);
+  const [correctIndex, setCorrectIndex] = useState(initial?.correctIndex ?? 0);
+  const [category, setCategory] = useState(initial?.category || "");
+  const [err, setErr] = useState("");
+
+  const submit = () => {
+    if (!question.trim()) return setErr("Add the question text.");
+    if (options.some((o) => !o.trim())) return setErr("Fill in all four options.");
+    onSave({
+      id: initial?.id || uid(),
+      question: question.trim(),
+      options: options.map((o) => o.trim()),
+      correctIndex,
+      category: category.trim(),
+      timesSeen: initial?.timesSeen || 0,
+      timesCorrect: initial?.timesCorrect || 0,
+      timesWrong: initial?.timesWrong || 0,
+    });
+  };
+
+  return (
+    <div className="fixed inset-0 z-30 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.6)" }}>
+      <Card className="w-full max-w-lg max-h-[85vh] overflow-y-auto">
+        <div className="flex items-center justify-between mb-4">
+          <h3 style={{ color: T.text, fontWeight: 700 }}>{initial ? "Edit question" : "Add a question"}</h3>
+          <button onClick={onCancel} style={{ color: T.textMuted }}><X size={18} /></button>
+        </div>
+
+        <textarea
+          value={question}
+          onChange={(e) => setQuestion(e.target.value)}
+          rows={3}
+          className="w-full rounded-lg px-3 py-2 mb-3 text-sm outline-none resize-none"
+          style={{ background: T.panelAlt, border: `1px solid ${T.border}`, color: T.text }}
+          placeholder="Write the question"
+        />
+
+        {options.map((opt, i) => (
+          <div key={i} className="flex items-center gap-2 mb-2">
+            <button onClick={() => setCorrectIndex(i)} style={{ color: correctIndex === i ? T.green : T.textFaint }}>
+              {correctIndex === i ? <CheckCircle2 size={20} /> : <Circle size={20} />}
+            </button>
+            <input
+              value={opt}
+              onChange={(e) => {
+                const next = [...options];
+                next[i] = e.target.value;
+                setOptions(next);
+              }}
+              placeholder={`Option ${String.fromCharCode(65 + i)}`}
+              className="flex-1 rounded-lg px-3 py-2 text-sm outline-none"
+              style={{ background: T.panelAlt, border: `1px solid ${correctIndex === i ? T.green : T.border}`, color: T.text }}
+            />
+          </div>
+        ))}
+
+        <input
+          value={category}
+          onChange={(e) => setCategory(e.target.value)}
+          placeholder="Category / topic (optional)"
+          className="w-full rounded-lg px-3 py-2 mb-3 text-sm outline-none"
+          style={{ background: T.panelAlt, border: `1px solid ${T.border}`, color: T.text }}
+        />
+
+        {err && <div className="text-xs mb-3 flex items-center gap-1.5" style={{ color: T.red }}><AlertCircle size={13} /> {err}</div>}
+
+        <div className="flex justify-end gap-2">
+          <Btn variant="ghost" onClick={onCancel}>Cancel</Btn>
+          <Btn onClick={submit}><Check size={15} /> Save question</Btn>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+function Dashboard({ bank, history, onStart, setView }) {
+  const weak = weakCategories(bank);
+  const avgScore =
+    history.length > 0
+      ? Math.round((history.reduce((s, h) => s + h.score / h.total, 0) / history.length) * 100)
+      : null;
+
+  return (
+    <div className="max-w-5xl mx-auto px-6 py-10">
+      <h1 style={{ color: T.text, fontSize: 32, fontWeight: 800 }}>Ready for a session?</h1>
+      <p style={{ color: T.textMuted }}>Each session pulls up to 50 questions, weighted toward weak questions.</p>
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 my-8">
+        <Card><div style={{ color: T.textMuted, fontSize: 12 }}>Questions</div><div style={{ color: T.amber, fontSize: 32, fontWeight: 700 }}>{bank.length}</div></Card>
+        <Card><div style={{ color: T.textMuted, fontSize: 12 }}>Sessions</div><div style={{ color: T.text, fontSize: 32, fontWeight: 700 }}>{history.length}</div></Card>
+        <Card><div style={{ color: T.textMuted, fontSize: 12 }}>Average score</div><div style={{ color: T.green, fontSize: 32, fontWeight: 700 }}>{avgScore === null ? "—" : `${avgScore}%`}</div></Card>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
+        <Card>
+          <div className="flex items-center gap-2 mb-2"><Play size={16} style={{ color: T.amber }} /> Start a session</div>
+          <Btn onClick={onStart} disabled={!bank.length} className="w-full justify-center"><Play size={15} /> Start session</Btn>
+        </Card>
+
+        <Card>
+          <div className="flex items-center gap-2 mb-2"><TrendingDown size={16} style={{ color: T.red }} /> Weak topics</div>
+          {weak.length === 0 ? (
+            <p style={{ color: T.textMuted, fontSize: 12 }}>No pattern yet.</p>
+          ) : weak.map((w) => (
+            <div key={w.cat} className="flex items-center justify-between text-xs">
+              <span>{w.cat}</span><span style={{ color: T.red }}>{Math.round(w.rate * 100)}% missed</span>
+            </div>
+          ))}
+        </Card>
+      </div>
+
+      <Btn variant="subtle" onClick={() => setView("manage")}><BookOpen size={15} /> Manage question bank</Btn>
+    </div>
+  );
+}
+
+function ManageBank({ bank, saveBank }) {
+  const [search, setSearch] = useState("");
+  const [formOpen, setFormOpen] = useState(false);
+  const [editing, setEditing] = useState(null);
+  const [uploadOpen, setUploadOpen] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(null);
+
+  const filtered = bank.filter(
+    (q) =>
+      q.question.toLowerCase().includes(search.toLowerCase()) ||
+      (q.category || "").toLowerCase().includes(search.toLowerCase())
+  );
+
+  const upsert = (q) => {
+    const exists = bank.some((b) => b.id === q.id);
+    const next = exists ? bank.map((b) => (b.id === q.id ? q : b)) : [q, ...bank];
+    saveBank(next);
+    setFormOpen(false);
+    setEditing(null);
+  };
+
+  const remove = (id) => {
+    saveBank(bank.filter((b) => b.id !== id));
+    setConfirmDelete(null);
+  };
+
+  return (
+    <div className="max-w-5xl mx-auto px-6 py-10">
+      <div className="flex items-center justify-between mb-6 flex-wrap gap-3">
+        <div>
+          <h1 style={{ color: T.text, fontSize: 28, fontWeight: 800 }}>Question bank</h1>
+          <p style={{ color: T.textMuted, fontSize: 14 }}>{bank.length} total</p>
+        </div>
+
+        <div className="flex gap-2">
+          <Btn variant="subtle" onClick={() => setUploadOpen(true)}><Upload size={15} /> Import file</Btn>
+          <Btn onClick={() => { setEditing(null); setFormOpen(true); }}><Plus size={15} /> Add question</Btn>
+        </div>
+      </div>
+
+      <div className="relative mb-4">
+        <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: T.textFaint }} />
+        <input
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search questions or categories..."
+          className="w-full rounded-lg pl-9 pr-3 py-2 text-sm outline-none"
+          style={{ background: T.panelAlt, border: `1px solid ${T.border}`, color: T.text }}
+        />
+      </div>
+
+      <div className="space-y-2">
+        {filtered.map((q) => (
+          <Card key={q.id} className="flex items-start justify-between gap-4">
+            <div className="min-w-0 flex-1">
+              <p style={{ color: T.text, marginBottom: 6 }}>{q.question}</p>
+              <div className="flex items-center gap-3 flex-wrap text-xs" style={{ color: T.textMuted }}>
+                <span style={{ color: T.green }}>
+                  {String.fromCharCode(65 + q.correctIndex)}. {q.options[q.correctIndex]}
+                </span>
+                {q.category && <span className="px-2 py-0.5 rounded" style={{ background: T.panelAlt }}>{q.category}</span>}
+                {(q.timesSeen || 0) > 0 && <span className="font-mono">{q.timesCorrect || 0}/{q.timesSeen} correct</span>}
+              </div>
+            </div>
+
+            <div className="flex gap-1">
+              <button onClick={() => { setEditing(q); setFormOpen(true); }} style={{ color: T.textMuted }}><Edit2 size={15} /></button>
+              <button onClick={() => setConfirmDelete(q.id)} style={{ color: T.red }}><Trash2 size={15} /></button>
+            </div>
+          </Card>
+        ))}
+      </div>
+
+      {formOpen && (
+        <QuestionForm
+          initial={editing}
+          onCancel={() => { setFormOpen(false); setEditing(null); }}
+          onSave={upsert}
+        />
+      )}
+
+      {uploadOpen && (
+        <UploadModal
+          onClose={() => setUploadOpen(false)}
+          onImport={(rows) => {
+            saveBank([...rows, ...bank]);
+            setUploadOpen(false);
+          }}
+        />
+      )}
+
+      {confirmDelete && (
+        <div className="fixed inset-0 z-30 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.6)" }}>
+          <Card className="w-full max-w-sm">
+            <p style={{ color: T.text, marginBottom: 16 }}>Delete this question? This can't be undone.</p>
+            <div className="flex justify-end gap-2">
+              <Btn variant="ghost" onClick={() => setConfirmDelete(null)}>Cancel</Btn>
+              <Btn variant="danger" onClick={() => remove(confirmDelete)}><Trash2 size={14} /> Delete</Btn>
+            </div>
+          </Card>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function UploadModal({ onClose, onImport }) {
+  const [rows, setRows] = useState(null);
+  const [invalidCount, setInvalidCount] = useState(0);
+  const [fileName, setFileName] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const inputRef = useRef(null);
+
+  const handleFile = (file) => {
+    if (!file) return;
+    setError("");
+    setBusy(true);
+    setFileName(file.name);
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const rawRows = parseFileToRows(e.target.result);
+        const parsed = rawRows.map(parseRowToQuestion);
+        const valid = parsed.filter(
+          (p) => p.question && p.options.every((o) => o) && p.correctIndex >= 0 && p.correctIndex <= 3
+        );
+        setInvalidCount(parsed.length - valid.length);
+        setRows(valid.map((v) => ({ id: uid(), ...v, timesSeen: 0, timesCorrect: 0, timesWrong: 0, include: true })));
+      } catch {
+        setError("Couldn't read file. Use .xlsx, .xls, or .csv.");
+      } finally {
+        setBusy(false);
+      }
+    };
+    reader.onerror = () => { setError("Couldn't read that file."); setBusy(false); };
+    reader.readAsArrayBuffer(file);
+  };
+
+  const toggleRow = (id) => setRows(rows.map((r) => (r.id === id ? { ...r, include: !r.include } : r)));
+
+  const confirm = () => {
+    const included = rows.filter((r) => r.include).map(({ include, ...rest }) => rest);
+    onImport(included);
+  };
+
+  return (
+    <div className="fixed inset-0 z-30 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.6)" }}>
+      <Card className="w-full max-w-2xl max-h-[85vh] overflow-y-auto">
+        <div className="flex items-center justify-between mb-4">
+          <h3 style={{ color: T.text, fontWeight: 700 }}>Import questions</h3>
+          <button onClick={onClose} style={{ color: T.textMuted }}><X size={18} /></button>
+        </div>
+
+        {!rows && (
+          <>
+            <div
+              onClick={() => inputRef.current?.click()}
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={(e) => {
+                e.preventDefault();
+                handleFile(e.dataTransfer.files?.[0]);
+              }}
+              className="rounded-xl border-2 border-dashed flex flex-col items-center justify-center py-10 cursor-pointer mb-3"
+              style={{ borderColor: T.border, background: T.panelAlt }}
+            >
+              {busy ? <Loader2 size={22} className="animate-spin mb-2" style={{ color: T.amber }} /> : <FileSpreadsheet size={22} className="mb-2" style={{ color: T.amber }} />}
+              <p style={{ color: T.text }}>{busy ? "Reading file..." : "Click to upload or drop a file here"}</p>
+              <p style={{ color: T.textMuted, fontSize: 12 }}>xlsx, xls, or csv</p>
+              <input
+                ref={inputRef}
+                type="file"
+                accept=".xlsx,.xls,.csv"
+                className="hidden"
+                onChange={(e) => handleFile(e.target.files?.[0])}
+              />
+            </div>
+
+            <p style={{ color: T.textFaint, fontSize: 12 }}>
+              Expected columns: Question, A/B/C/D or Option A-D, Answer, optional Category.
+            </p>
+
+            {error && <div className="text-xs mt-3 flex items-center gap-1.5" style={{ color: T.red }}><AlertCircle size={13} /> {error}</div>}
+          </>
+        )}
+
+        {rows && (
+          <>
+            <div className="flex items-center justify-between mb-3 text-xs" style={{ color: T.textMuted }}>
+              <span>
+                <b style={{ color: T.green }}>{rows.length}</b> questions parsed from{" "}
+                <span style={{ color: T.text }}>{fileName}</span>
+                {invalidCount > 0 && <span style={{ color: T.red }}> · {invalidCount} row(s) skipped</span>}
+              </span>
+              <button
+                onClick={() => {
+                  setRows(null);
+                  setInvalidCount(0);
+                }}
+                style={{ color: T.amber }}
+              >
+                Choose a different file
+              </button>
+            </div>
+
+            <div className="space-y-2 max-h-80 overflow-y-auto mb-4">
+              {rows.map((r) => (
+                <div
+                  key={r.id}
+                  className="flex items-start gap-2 rounded-lg p-3"
+                  style={{ background: T.panelAlt, border: `1px solid ${T.border}`, opacity: r.include ? 1 : 0.4 }}
+                >
+                  <button onClick={() => toggleRow(r.id)} className="mt-0.5">
+                    {r.include ? <CheckCircle2 size={16} style={{ color: T.green }} /> : <Circle size={16} style={{ color: T.textFaint }} />}
+                  </button>
+                  <div>
+                    <p style={{ color: T.text }}>{r.question}</p>
+                    <p style={{ color: T.green, fontSize: 12 }}>
+                      {String.fromCharCode(65 + r.correctIndex)}. {r.options[r.correctIndex]}
+                    </p>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="flex justify-end gap-2">
+              <Btn variant="ghost" onClick={onClose}>Cancel</Btn>
+              <Btn onClick={confirm} disabled={!rows.some((r) => r.include)}>
+                <Check size={15} /> Import {rows.filter((r) => r.include).length} question{rows.filter((r) => r.include).length === 1 ? "" : "s"}
+              </Btn>
+            </div>
+          </>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+function ScantronGrid({ items, currentIdx, onJump }) {
+  return (
+    <div className="grid grid-cols-8 sm:grid-cols-10 gap-1.5">
+      {items.map((status, i) => {
+        const colors = {
+          unanswered: { bg: T.panelAlt, border: T.border },
+          answered: { bg: T.amberSoft, border: T.amber },
+          correct: { bg: T.greenSoft, border: T.green },
+          wrong: { bg: T.redSoft, border: T.red },
+        }[status];
+
+        const isCurrent = i === currentIdx;
+        return (
+          <button
+            key={i}
+            onClick={() => onJump && onJump(i)}
+            className="aspect-square rounded-md flex items-center justify-center text-[11px] font-mono"
+            style={{
+              background: colors.bg,
+              border: `1.5px solid ${isCurrent ? T.amber : colors.border}`,
+              color: T.text,
+            }}
+          >
+            {i + 1}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function SessionView({ sessionQs, answers, setAnswers, currentIdx, setCurrentIdx, onSubmit }) {
+  const q = sessionQs[currentIdx];
+  const statuses = sessionQs.map((sq) => (answers[sq.id] !== undefined ? "answered" : "unanswered"));
+  const answeredCount = statuses.filter((s) => s === "answered").length;
+
+  if (!q) return null;
+
+  return (
+    <div className="max-w-3xl mx-auto px-6 py-8">
+      <Card className="mb-5">
+        <div className="flex items-center justify-between mb-3">
+          <span className="text-xs font-mono" style={{ color: T.textMuted }}>{answeredCount} / {sessionQs.length} answered</span>
+          <span className="text-xs font-mono" style={{ color: T.amber }}>Q{currentIdx + 1}</span>
+        </div>
+        <ScantronGrid items={statuses} currentIdx={currentIdx} onJump={setCurrentIdx} />
+      </Card>
+
+      <Card>
+        <p className="text-xs mb-2 font-mono" style={{ color: T.textFaint }}>{q.category || "General"}</p>
+        <p className="text-base mb-5 leading-relaxed" style={{ color: T.text }}>{q.question}</p>
+
+        {q.options.map((opt, i) => {
+          const selected = answers[q.id] === i;
+          return (
+            <button
+              key={i}
+              onClick={() => setAnswers({ ...answers, [q.id]: i })}
+              className="w-full text-left px-4 py-3 rounded-lg mb-2 flex items-center gap-3"
+              style={{ background: selected ? T.amberSoft : T.panelAlt, border: `1px solid ${selected ? T.amber : T.border}` }}
+            >
+              <span
+                className="font-mono text-xs w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0"
+                style={{ border: `1px solid ${selected ? T.amber : T.textFaint}`, color: selected ? T.amber : T.textMuted }}
+              >
+                {String.fromCharCode(65 + i)}
+              </span>
+              <span className="text-sm" style={{ color: T.text }}>{opt}</span>
+            </button>
+          );
+        })}
+
+        <div className="flex items-center justify-between mt-6">
+          <Btn variant="ghost" disabled={currentIdx === 0} onClick={() => setCurrentIdx(currentIdx - 1)}>
+            <ChevronLeft size={15} /> Prev
+          </Btn>
+
+          {currentIdx < sessionQs.length - 1 ? (
+            <Btn variant="subtle" onClick={() => setCurrentIdx(currentIdx + 1)}>
+              Next <ChevronRight size={15} />
+            </Btn>
+          ) : (
+            <Btn onClick={onSubmit}>
+              <Check size={15} /> Submit session
+            </Btn>
+          )}
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+function ResultsView({ result, onNewSession, onHome }) {
+  const pct = Math.round((result.score / result.total) * 100);
+  const wrongOrSkipped = result.details.filter((d) => !d.correct);
+
+  return (
+    <div className="max-w-3xl mx-auto px-6 py-10">
+      <Card className="text-center mb-6 py-10">
+        <Award size={28} className="mx-auto mb-3" style={{ color: T.amber }} />
+        <div className="text-5xl font-bold font-mono mb-1" style={{ color: T.text }}>
+          {result.score}<span style={{ color: T.textMuted, fontSize: "1.5rem" }}>/{result.total}</span>
+        </div>
+        <p className="text-sm mb-1" style={{ color: T.amber }}>{pct}%</p>
+      </Card>
+
+      {wrongOrSkipped.length > 0 && (
+        <div className="mb-6">
+          <h3 className="text-sm font-medium mb-3" style={{ color: T.text }}>Review</h3>
+          <div className="space-y-3">
+            {wrongOrSkipped.map((d, i) => (
+              <Card key={i}>
+                <p className="text-sm mb-3" style={{ color: T.text }}>{d.question}</p>
+                {d.options.map((opt, oi) => {
+                  const isCorrect = oi === d.correctIndex;
+                  const isYours = oi === d.selected;
+                  return (
+                    <div
+                      key={oi}
+                      className="flex items-center gap-2 px-3 py-2 rounded-lg mb-1.5 text-sm"
+                      style={{
+                        background: isCorrect ? T.greenSoft : isYours ? T.redSoft : "transparent",
+                        border: `1px solid ${isCorrect ? T.green : isYours ? T.red : T.border}`,
+                      }}
+                    >
+                      {isCorrect ? <CheckCircle2 size={14} style={{ color: T.green }} /> : isYours ? <XCircle size={14} style={{ color: T.red }} /> : <span className="w-3.5" />}
+                      <span>{opt}</span>
+                    </div>
+                  );
+                })}
+              </Card>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="flex gap-3 justify-center">
+        <Btn variant="ghost" onClick={onHome}><Home size={15} /> Dashboard</Btn>
+        <Btn onClick={onNewSession}><RotateCcw size={15} /> New session</Btn>
+      </div>
+    </div>
+  );
+}
+
+export default function App() {
+  const [view, setView] = useState("loading");
+  const [bank, setBank] = useState([]);
+  const [history, setHistory] = useState([]);
+  const [sessionQs, setSessionQs] = useState([]);
+  const [answers, setAnswers] = useState({});
+  const [currentIdx, setCurrentIdx] = useState(0);
+  const [lastResult, setLastResult] = useState(null);
+
+  useEffect(() => {
+    (async () => {
+      const b = await loadKey("mcq_bank", []);
+      const h = await loadKey("session_history", []);
+      setBank(b);
+      setHistory(h);
+      setView("dashboard");
+    })();
+  }, []);
+
+  const persistBank = (next) => {
+    setBank(next);
+    saveKey("mcq_bank", next);
+  };
+
+  const persistHistory = (next) => {
+    setHistory(next);
+    saveKey("session_history", next);
+  };
+
+  const startSession = () => {
+    const qs = buildSession(bank, 50);
+    setSessionQs(qs);
+    setAnswers({});
+    setCurrentIdx(0);
+    setView("session");
+  };
+
+  const submitSession = () => {
+    const details = sessionQs.map((q) => {
+      const sel = answers[q.id];
+      const correct = sel === q.correctIndex;
+      return {
+        qid: q.id,
+        question: q.question,
+        options: q.options,
+        correctIndex: q.correctIndex,
+        selected: sel ?? null,
+        correct,
+        category: q.category || "",
+      };
+    });
+
+    const score = details.filter((d) => d.correct).length;
+    const total = sessionQs.length;
+
+    const updatedBank = bank.map((q) => {
+      const result = details.find((d) => d.qid === q.id);
+      if (!result) return q;
+      return {
+        ...q,
+        timesSeen: (q.timesSeen || 0) + 1,
+        timesCorrect: (q.timesCorrect || 0) + (result.correct ? 1 : 0),
+        timesWrong: (q.timesWrong || 0) + (result.correct ? 0 : 1),
+      };
+    });
+
+    const historyEntry = {
+      id: uid(),
+      score,
+      total,
+      percent: Math.round((score / total) * 100),
+      createdAt: Date.now(),
+      details,
+    };
+
+    const updatedHistory = [historyEntry, ...history];
+
+    persistBank(updatedBank);
+    persistHistory(updatedHistory);
+    setLastResult(historyEntry);
+    setView("results");
+  };
+
+  if (view === "loading") return null;
+
+  return (
+    <div style={{ minHeight: "100vh", background: T.bg }}>
+      <TopBar view={view} setView={setView} onExitSession={() => setView("dashboard")} />
+      {view === "dashboard" && <Dashboard bank={bank} history={history} onStart={startSession} setView={setView} />}
+      {view === "manage" && <ManageBank bank={bank} saveBank={persistBank} />}
+      {view === "session" && (
+        <SessionView
+          sessionQs={sessionQs}
+          answers={answers}
+          setAnswers={setAnswers}
+          currentIdx={currentIdx}
+          setCurrentIdx={setCurrentIdx}
+          onSubmit={submitSession}
+        />
+      )}
+      {view === "results" && lastResult && <ResultsView result={lastResult} onHome={() => setView("dashboard")} onNewSession={startSession} />}
+    </div>
+  );
+}
